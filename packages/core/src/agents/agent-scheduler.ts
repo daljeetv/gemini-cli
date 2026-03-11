@@ -64,6 +64,8 @@ export async function scheduleAgentTools(
     schedulerId,
     parentCallId,
     onWaitingForConfirmation,
+    // OB1: Pass max tool concurrency from config for parallel execution
+    maxToolConcurrency: config.getMaxToolConcurrency(),
   });
 
   return scheduler.schedule(requests, signal);

@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { DEFAULT_MAX_TOOL_CONCURRENCY } from '../config/config.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { SchedulerStateManager } from './state-manager.js';
 import { resolveConfirmation } from './confirmation.js';
@@ -51,6 +52,7 @@ export interface SchedulerOptions {
   getPreferredEditor: () => EditorType | undefined;
   schedulerId: string;
   parentCallId?: string;
+  maxToolConcurrency?: number; // OB1: Configurable parallel tool execution
   onWaitingForConfirmation?: (waiting: boolean) => void;
 }
 
@@ -92,6 +94,7 @@ export class Scheduler {
   private readonly schedulerId: string;
   private readonly parentCallId?: string;
   private readonly onWaitingForConfirmation?: (waiting: boolean) => void;
+  private readonly maxToolConcurrency: number; // OB1: Max concurrent tools
 
   private isProcessing = false;
   private isCancelling = false;
@@ -104,6 +107,9 @@ export class Scheduler {
     this.schedulerId = options.schedulerId;
     this.parentCallId = options.parentCallId;
     this.onWaitingForConfirmation = options.onWaitingForConfirmation;
+    // OB1: Initialize max concurrency (default 10 like Claude Code)
+    this.maxToolConcurrency =
+      options.maxToolConcurrency ?? DEFAULT_MAX_TOOL_CONCURRENCY;
     this.state = new SchedulerStateManager(
       this.messageBus,
       this.schedulerId,
@@ -328,18 +334,102 @@ export class Scheduler {
 
   // --- Phase 2: Processing Loop ---
 
+  // OB1: Parallel tool execution - process multiple tools concurrently
   private async _processQueue(signal: AbortSignal): Promise<void> {
-    while (this.state.queueLength > 0 || this.state.isActive) {
-      const shouldContinue = await this._processNextItem(signal);
-      if (!shouldContinue) break;
+    while (this.state.queueLength > 0 || this.state.activeCallCount > 0) {
+      if (signal.aborted || this.isCancelling) {
+        this.state.cancelAllQueued('Operation cancelled');
+        break;
+      }
+
+      // Calculate available slots for parallel execution
+      const availableSlots =
+        this.maxToolConcurrency - this.state.activeCallCount;
+      if (availableSlots <= 0) {
+        // At capacity - wait a tick for any active call to complete
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        continue;
+      }
+
+      // Dequeue up to availableSlots items
+      const batch: ToolCall[] = [];
+      while (batch.length < availableSlots && this.state.queueLength > 0) {
+        const next = this.state.dequeue();
+        if (next) {
+          // Handle already-errored tools immediately
+          if (next.status === 'error') {
+            this.state.updateStatus(
+              next.request.callId,
+              'error',
+              next.response,
+            );
+            this.state.finalizeCall(next.request.callId);
+          } else {
+            batch.push(next);
+          }
+        }
+      }
+
+      if (batch.length === 0) {
+        // Queue empty or all errors, wait for active calls
+        if (this.state.activeCallCount > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        continue;
+      }
+
+      // Execute batch in parallel (filter to validating calls only)
+      const validatingCalls = batch.filter(
+        (call): call is ValidatingToolCall => call.status === 'validating',
+      );
+      await Promise.all(
+        validatingCalls.map((call) =>
+          this._processValidatingCallParallel(call, signal),
+        ),
+      );
     }
   }
 
   /**
-   * Processes the next item in the queue.
+   * OB1: Process a validating call in parallel context.
+   * Handles errors gracefully without affecting other parallel calls.
+   */
+  private async _processValidatingCallParallel(
+    active: ValidatingToolCall,
+    signal: AbortSignal,
+  ): Promise<void> {
+    try {
+      await this._processToolCall(active, signal);
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      if (signal.aborted || err.name === 'AbortError') {
+        this.state.updateStatus(
+          active.request.callId,
+          'cancelled',
+          'Operation cancelled',
+        );
+      } else {
+        this.state.updateStatus(
+          active.request.callId,
+          'error',
+          createErrorResponse(
+            active.request,
+            err,
+            ToolErrorType.UNHANDLED_EXCEPTION,
+          ),
+        );
+      }
+    }
+    this.state.finalizeCall(active.request.callId);
+  }
+  // End OB1 parallel execution
+
+  /**
+   * Processes the next item in the queue (legacy sequential).
    * @returns true if the loop should continue, false if it should terminate.
    */
-  private async _processNextItem(signal: AbortSignal): Promise<boolean> {
+   
+  private async _processNextItemLegacy(signal: AbortSignal): Promise<boolean> {
     if (signal.aborted || this.isCancelling) {
       this.state.cancelAllQueued('Operation cancelled');
       return false;

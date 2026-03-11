@@ -311,6 +311,9 @@ export {
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 40_000;
 
+// OB1: Default max concurrent tool executions (matches Claude Code's default)
+export const DEFAULT_MAX_TOOL_CONCURRENCY = 10;
+
 export class MCPServerConfig {
   constructor(
     // For stdio transport
@@ -447,6 +450,8 @@ export interface ConfigParameters {
   extensionManagement?: boolean;
   enablePromptCompletion?: boolean;
   truncateToolOutputThreshold?: number;
+  /** OB1: Maximum number of tools to execute in parallel */
+  maxToolConcurrency?: number;
   eventEmitter?: EventEmitter;
   useWriteTodos?: boolean;
   policyEngineConfig?: PolicyEngineConfig;
@@ -614,6 +619,7 @@ export class Config {
   private readonly extensionManagement: boolean = true;
   private readonly enablePromptCompletion: boolean = false;
   private readonly truncateToolOutputThreshold: number;
+  private readonly maxToolConcurrency: number; // OB1: Parallel tool execution
   private compressionTruncationCounter = 0;
   private initialized: boolean = false;
   readonly storage: Storage;
@@ -804,6 +810,9 @@ export class Config {
     this.truncateToolOutputThreshold =
       params.truncateToolOutputThreshold ??
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
+    // OB1: Initialize max tool concurrency
+    this.maxToolConcurrency =
+      params.maxToolConcurrency ?? DEFAULT_MAX_TOOL_CONCURRENCY;
     // // TODO(joshualitt): Re-evaluate the todo tool for 3 family.
     this.useWriteTodos = isPreviewModel(this.model)
       ? false
@@ -2290,6 +2299,14 @@ export class Config {
         (tokenLimit(this.model) - uiTelemetryService.getLastPromptTokenCount()),
       this.truncateToolOutputThreshold,
     );
+  }
+
+  /**
+   * OB1: Get the maximum number of tools to execute in parallel.
+   * Default is 10 (matching Claude Code's behavior).
+   */
+  getMaxToolConcurrency(): number {
+    return this.maxToolConcurrency;
   }
 
   getNextCompressionTruncationId(): number {

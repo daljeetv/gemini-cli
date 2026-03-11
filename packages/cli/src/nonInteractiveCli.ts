@@ -215,6 +215,8 @@ export async function runNonInteractive({
         messageBus: config.getMessageBus(),
         getPreferredEditor: () => undefined,
         schedulerId: ROOT_SCHEDULER_ID,
+        // OB1: Enable parallel tool execution from config
+        maxToolConcurrency: config.getMaxToolConcurrency(),
       });
 
       // Initialize chat.  Resume if resume data is passed.

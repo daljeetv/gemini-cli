@@ -80,6 +80,8 @@ export function useToolExecutionScheduler(
         messageBus,
         getPreferredEditor: () => getPreferredEditorRef.current(),
         schedulerId: ROOT_SCHEDULER_ID,
+        // OB1: Enable parallel tool execution from config
+        maxToolConcurrency: config.getMaxToolConcurrency(),
       }),
     [config, messageBus],
   );
